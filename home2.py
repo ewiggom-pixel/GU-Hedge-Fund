@@ -21,7 +21,7 @@ logo_path = "https://raw.githubusercontent.com/ewiggom-pixel/GU-Hedge-Fund/main/
 st.markdown("""
 <style>
 .stApp {
-    background-color: #072f5f;
+   background: linear-gradient(180deg, #000000 0%, #072f5f 100%);
 }
 
 /* Navigation links */
