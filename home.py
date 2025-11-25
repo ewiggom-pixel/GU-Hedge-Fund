@@ -140,6 +140,6 @@ st.markdown("""
 # DASHBOARD BUTTON
 st.markdown("""
 <div class="dashboard-btn">
-    <a href="pages/Dashboard.py">Try It Now</a>
+    <a href="/CSV" target="_self">Try It Now</a>
 </div>
 """, unsafe_allow_html=True)
