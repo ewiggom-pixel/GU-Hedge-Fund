@@ -15,7 +15,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Logo URL
-logo_path = "https://raw.githubusercontent.com/ewiggom-pixel/GU-Hedge-Fund/main/hoyalytics_logo-removebg-preview.png"
+logo_path = https://raw.githubusercontent.com/ewiggom-pixel/GU-Hedge-Fund/37053e6bbddf5f44f6fd8443dfd12f8516f2c73a/hoyalytics_logo-removebg-preview.png
 
 # --- CSS ---
 st.markdown("""
