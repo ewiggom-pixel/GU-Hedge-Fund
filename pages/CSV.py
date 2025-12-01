@@ -261,7 +261,8 @@ else:
                 port[date_col] = pd.to_datetime(port[date_col])
                 port = port.sort_values(date_col)
 
-                return_candidates = ["return", "ret", "portfolio_return", "portfolio_ret", "excess_ret"]
+                return_candidates = ["return", "ret", "portfolio_return", "portfolio_ret",
+                                     "excess_ret", "excess_return"]
                 return_col = None
                 for name in return_candidates:
                     if name in cols_lower:
@@ -286,6 +287,7 @@ else:
                 port = port.dropna(subset=["portfolio_ret"])
                 port = port[[date_col, "portfolio_ret"]].rename(columns={date_col: "date"})
 
+            # --- Frequency choice ---
             freq_choice = st.radio(
                 "Regression frequency",
                 ["Daily (FF5 + UMD)", "Monthly (FF5 + UMD)"]
@@ -296,6 +298,8 @@ else:
                 end_date = port["date"].max().strftime("%Y-%m-%d")
                 ff6 = load_ff6_daily(start_date, end_date, wrds_user, wrds_pass)
                 df = port.merge(ff6, on="date", how="inner")
+                periods_per_year = 252
+                freq_label = "Daily"
             else:
                 port_m = (
                     port
@@ -313,6 +317,8 @@ else:
                 df = port_m.merge(ff6, on="ym", how="inner", suffixes=("_port", "_ff6"))
                 df = df.rename(columns={"date_port": "date", "portfolio_ret_port": "portfolio_ret"})
                 df = df.drop(columns=["date_ff6", "ym"])
+                periods_per_year = 12
+                freq_label = "Monthly"
 
             num_cols = ["portfolio_ret", "mktrf", "smb", "hml", "rmw", "cma", "rf", "umd"]
             for c in num_cols:
@@ -357,7 +363,6 @@ else:
             params = pd.Series(model.params, index=param_names)
             coeff_table = pd.DataFrame({"Coefficient": params})
             st.write(coeff_table.round(6))
-            
 
             st.subheader("Factor Betas")
             betas_only = params[
@@ -366,27 +371,22 @@ else:
             betas_df = betas_only.to_frame(name="Beta")
             st.bar_chart(betas_df)
 
-            st.subheader("Dynamic Multi-Factor (DLM) Estimates")
+            # --- DLM ---
+            st.subheader("Dynamic Multi-Factor (DLM) Alpha")
             factor_cols_dlm = ["mktrf", "smb", "hml", "rmw", "cma", "umd"]
             F_dlm = df[factor_cols_dlm].to_numpy(dtype=float)
             y_dlm = df["excess_ret"].to_numpy(dtype=float)
-
             res_dlm = em_dlm_multifactor(y_dlm, F_dlm)
             alpha_dlm = float(res_dlm["alpha"])
             betas_dlm_smooth = np.asarray(res_dlm["beta_smooth"], dtype=float)
-            betas_dlm_filt = np.asarray(res_dlm.get("beta_filt", betas_dlm_smooth), dtype=float)
-
-            st.metric("Alpha (DLM, daily)", f"{alpha_dlm:.6f}")
             avg_betas_dlm = betas_dlm_smooth.mean(axis=0)
             avg_beta_series = pd.Series(avg_betas_dlm, index=factor_cols_dlm)
+            st.metric(f"Alpha (DLM, {freq_label.lower()})", f"{alpha_dlm:.6f}")
             st.write("Average DLM betas (smoothed):")
             st.write(avg_beta_series.round(4))
 
-            for j, name in enumerate(factor_cols_dlm):
-                df[f"{name}_beta_filtered"] = betas_dlm_filt[:, j]
-                df[f"{name}_beta_smoothed"] = betas_dlm_smooth[:, j]
-
-            st.subheader("Rolling OLS Betas vs DLM Betas")
+            # --- Rolling OLS + Kalman ---
+            st.subheader("Rolling OLS Betas and Kalman-smoothed OLS Betas")
             nobs = len(df)
             if freq_choice.startswith("Daily"):
                 default_window = 252
@@ -396,14 +396,8 @@ else:
             if nobs < 20:
                 st.warning("Not enough observations for rolling OLS betas.")
             else:
-                window = st.number_input(
-                    "Rolling window length",
-                    min_value=12,
-                    max_value=nobs,
-                    value=min(default_window, nobs),
-                    step=5
-                )
-                window = int(window)
+                # automatic window choice (no user input)
+                window = min(default_window, nobs)
                 factor_cols_roll = factor_cols_dlm
                 roll_betas = np.full((nobs, len(factor_cols_roll)), np.nan)
                 for i in range(window, nobs + 1):
@@ -415,18 +409,74 @@ else:
                 for j, name in enumerate(factor_cols_roll):
                     df[f"{name}_beta_roll"] = roll_betas[:, j]
 
-                plot_cols = []
-                for name in factor_cols_dlm:
-                    plot_cols.append(f"{name}_beta_roll")
-                    plot_cols.append(f"{name}_beta_filtered")
-                    plot_cols.append(f"{name}_beta_smoothed")
+                def kalman_smooth_1d(obs, q=1e-5, r=None):
+                    obs = np.asarray(obs, dtype=float)
+                    n = len(obs)
+                    out = np.full(n, np.nan)
+                    valid = ~np.isnan(obs)
+                    idx = np.where(valid)[0]
+                    if idx.size == 0:
+                        return out
+                    if r is None:
+                        r = np.nanvar(obs[valid])
+                        if not np.isfinite(r) or r <= 0:
+                            r = 1e-4
+                    x = obs[idx[0]]
+                    P = 1.0
+                    out[idx[0]] = x
+                    Q = q
+                    R = r
+                    for t in range(idx[0] + 1, n):
+                        x_pred = x
+                        P_pred = P + Q
+                        if valid[t]:
+                            z = obs[t]
+                            K = P_pred / (P_pred + R)
+                            x = x_pred + K * (z - x_pred)
+                            P = (1.0 - K) * P_pred
+                        else:
+                            x = x_pred
+                            P = P_pred
+                        out[t] = x
+                    return out
 
-                overlap_plot = df.set_index("date")[plot_cols]
-                st.line_chart(overlap_plot)
+                for name in factor_cols_roll:
+                    roll_series = df[f"{name}_beta_roll"].to_numpy(dtype=float)
+                    df[f"{name}_beta_kalman"] = kalman_smooth_1d(roll_series)
 
+                plot_mode = st.radio(
+                    "Rolling beta view",
+                    ["By factor", "All factors"],
+                    index=0,
+                )
+
+                df_idx = df.set_index("date")
+
+                if plot_mode == "By factor":
+                    factor_choice = st.selectbox("Choose factor", factor_cols_roll)
+                    plot_df = df_idx[
+                        [f"{factor_choice}_beta_roll", f"{factor_choice}_beta_kalman"]
+                    ].rename(
+                        columns={
+                            f"{factor_choice}_beta_roll": "Rolling OLS beta",
+                            f"{factor_choice}_beta_kalman": "Kalman-smoothed beta",
+                        }
+                    )
+                    st.line_chart(plot_df)
+                else:
+                    plot_cols = []
+                    for name in factor_cols_roll:
+                        plot_cols.append(f"{name}_beta_roll")
+                        plot_cols.append(f"{name}_beta_kalman")
+                    overlap_plot = df_idx[plot_cols]
+                    st.line_chart(overlap_plot)
+
+            # --- stash for Dynamic Multi-Factor page ---
             st.session_state["dlm_result"] = res_dlm
             st.session_state["dlm_factor_cols"] = factor_cols_dlm
             st.session_state["dlm_df"] = df.copy()
+            st.session_state["dlm_periods_per_year"] = periods_per_year
+            st.session_state["dlm_freq_label"] = freq_label
             st.session_state["factor_cols"] = factor_cols_dlm
             st.session_state["combined_df"] = df.copy()
 
